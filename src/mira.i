@@ -289,8 +289,6 @@ _MIRA_LENGTH_UNITS_TABLE = h_new("m",           MIRA_METER,
  *   MASTER.vis - complex visibility data (see below for layout)
  *   MASTER.vis2 - powerspectrum data (see below for layout)
  *   MASTER.vis3 - bispectrum data (see below for layout)
- *   MASTER.monochromatic - monochromatic or gray case?
- *   MASTER.monochromatic_option - monochromatic option as set by user
  *   MASTER.u - list of measured spatial frequencies
  *   MASTER.v - list of measured spatial frequencies
  *   MASTER.w - list of measured wavelenghts
@@ -375,7 +373,7 @@ _MIRA_LENGTH_UNITS_TABLE = h_new("m",           MIRA_METER,
  *
  *     DB.u ~ MASTER.u(DB.idx)*DB.sgn
  *     DB.v ~ MASTER.v(DB.idx)*DB.sgn
- *     DB.w ~ MASTER.w(DB.idx)            // not in monochromatic mode
+ *     DB.w ~ MASTER.w(DB.idx)
  *
  *   where MASTER is the parent of datablock DB
  *
@@ -383,7 +381,7 @@ _MIRA_LENGTH_UNITS_TABLE = h_new("m",           MIRA_METER,
 
 func mira_new(.., wavemin=, wavemax=,
               eff_wave=, eff_band=, wave_tol=,
-              quiet=, base_tol=, monochromatic=,
+              quiet=, base_tol=,
               noise_method=, noise_level=,
               cleanup_bad_data=, target=, goodman=,
               no_t3=, no_vis=, no_vis2=)
@@ -401,6 +399,10 @@ func mira_new(.., wavemin=, wavemax=,
        EFF_BAND = Effective spectral bandwidth (units: meters), default value
            is 1e-7 (0.1 micron).
 
+       WAVEMIN = Lower bound for the selected wavelength range (in meters).
+
+       WAVEMAX = Upper bound for the selected wavelength range (in meters).
+
        WAVE_TOL = Tolerance for wavelength grouping (units: meters).  Default
            value is 1e-10 (1 Ångström).  This tolerance is used to decide
            whether different wavelengths correspond to the same one.
@@ -408,9 +410,6 @@ func mira_new(.., wavemin=, wavemax=,
        BASE_TOL = Tolerance for baseline grouping (units: meters).  Default
            value is 1e-3 (1 millimeter).  This tolerance is used to decide
            whether different positions correspond to the same baseline.
-
-       MONOCHROMATIC = True if a monochromatic (gray) model of the object
-           brightness distribution is to be reconstructed.
 
        NO_VIS = True to not use complex visibilities (OI_VIS data-blocks).
 
@@ -460,7 +459,6 @@ func mira_new(.., wavemin=, wavemax=,
  */
 {
   if (is_void(quiet)) quiet = 0;
-  if (is_void(monochromatic)) monochromatic = 1n;
 
   /* Get spectral bandwidth parameters (in meters). */
   choice = ((is_void(wavemin)  ? 0 : 1) |
@@ -511,7 +509,6 @@ func mira_new(.., wavemin=, wavemax=,
                  eff_band = eff_band,
                  wave_tol = wave_tol,
                  base_tol = base_tol,
-                 monochromatic_option = monochromatic,
                  flags = 0,
                  flux_weight = 0.0,
                  flux_mean = 1.0,
@@ -916,90 +913,71 @@ func _mira_build_coordinate_list(master)
     return;
   }
 
-  /* Figure out whether or not we are in "monochromatic" mode. */
-  w_digit = mira_digitize(master.w, master.wave_tol);
-  number_of_wavelengths = numberof(w_digit.value);
-  if (number_of_wavelengths > 1) {
-    monochromatic = (master.monochromatic_option ? 1n : 0n);
-    w = w_digit.value;
-  } else {
-    monochromatic = 1n;
-    w = w_digit.value(1);
-  }
-  h_set, master, w = w, monochromatic = monochromatic;
-
-
   /*
   ** Make a list of "unique" coordinates using a *slow* O(N^2) algorithm.
   */
 
-  if (monochromatic) {
+  local u_inp, v_inp;
+  eq_nocopy, u_inp, master.u;
+  eq_nocopy, v_inp, master.v;
+  number = numberof(u_inp);
+  u_out = array(double, number); /* maximum size */
+  v_out = array(double, number); /* maximum size */
+  n_out = array(long, number); /* maximum size */
+  idx = array(long, number);
+  sgn = array(long, number);
+  mid_wavelength = 0.5*(max(master.w) + min(master.w));
+  freq_tol = master.base_tol/mid_wavelength;
 
-    local u_inp, v_inp;
-    eq_nocopy, u_inp, master.u;
-    eq_nocopy, v_inp, master.v;
-    number = numberof(u_inp);
-    u_out = array(double, number); /* maximum size */
-    v_out = array(double, number); /* maximum size */
-    n_out = array(long, number); /* maximum size */
-    idx = array(long, number);
-    sgn = array(long, number);
-    mid_wavelength = 0.5*(max(master.w) + min(master.w));
-    freq_tol = master.base_tol/mid_wavelength;
+  j = k = 1;
+  u_out(k) = u_inp(j);
+  v_out(k) = v_inp(j);
+  n_out(k) = 1;
+  idx(j) = k;
+  sgn(j) = 1;
+  while (++j <= number) {
 
-    j = k = 1;
-    u_out(k) = u_inp(j);
-    v_out(k) = v_inp(j);
-    n_out(k) = 1;
-    idx(j) = k;
-    sgn(j) = 1;
-    while (++j <= number) {
+    /* Get j-th position. */
+    u = u_inp(j);
+    v = v_inp(j);
 
-      /* Get j-th position. */
-      u = u_inp(j);
-      v = v_inp(j);
-
-      /* Search +/-position among list of positions. */
-      u_tmp = u_out(1:k);
-      v_tmp = v_out(1:k);
-      rp = (temp = u - u_tmp)*temp + (temp = v - v_tmp)*temp;
-      rn = (temp = u + u_tmp)*temp + (temp = v + v_tmp)*temp;
-      rp_min = min(rp);
-      rn_min = min(rn);
-      if (min(rp_min, rn_min) > freq_tol) {
-        /* Got a new position. */
-        idx(j) = ++k;
-        sgn(j) = 1;
-        u_out(k) = u;
-        v_out(k) = v;
-        n_out(k) = 1;
-      } else if (rp_min <= rn_min) {
-        idx(j) = (kp = rp(mnx));
-        sgn(j) = 1;
-        np1 = (n = n_out(kp)) + 1;
-        u_out(kp) = (n*u_out(kp) + u)/np1;
-        v_out(kp) = (n*v_out(kp) + v)/np1;
-        n_out(kp) = np1;
-      } else {
-        idx(j) = (kp = rn(mnx));
-        sgn(j) = 1;
-        np1 = (n = n_out(kp)) + 1;
-        u_out(kp) = (n*u_out(kp) - u)/np1;
-        v_out(kp) = (n*v_out(kp) - v)/np1;
-        n_out(kp) = np1;
-      }
+    /* Search +/-position among list of positions. */
+    u_tmp = u_out(1:k);
+    v_tmp = v_out(1:k);
+    rp = (temp = u - u_tmp)*temp + (temp = v - v_tmp)*temp;
+    rn = (temp = u + u_tmp)*temp + (temp = v + v_tmp)*temp;
+    rp_min = min(rp);
+    rn_min = min(rn);
+    if (min(rp_min, rn_min) > freq_tol) {
+      /* Got a new position. */
+      idx(j) = ++k;
+      sgn(j) = 1;
+      u_out(k) = u;
+      v_out(k) = v;
+      n_out(k) = 1;
+    } else if (rp_min <= rn_min) {
+      idx(j) = (kp = rp(mnx));
+      sgn(j) = 1;
+      np1 = (n = n_out(kp)) + 1;
+      u_out(kp) = (n*u_out(kp) + u)/np1;
+      v_out(kp) = (n*v_out(kp) + v)/np1;
+      n_out(kp) = np1;
+    } else {
+      idx(j) = (kp = rn(mnx));
+      sgn(j) = 1;
+      np1 = (n = n_out(kp)) + 1;
+      u_out(kp) = (n*u_out(kp) - u)/np1;
+      v_out(kp) = (n*v_out(kp) - v)/np1;
+      n_out(kp) = np1;
     }
-    if (k < number) {
-      u_out = u_out(1:k);
-      v_out = v_out(1:k);
-      n_out = n_out(1:k);
-    }
-    write, format="There are %d sampled frequencies out of %d measurements.\n",
-        k, number;
-
-  } else {
-    error, "only monochromatic mode is implemented by MiRA";
   }
+  if (k < number) {
+    u_out = u_out(1:k);
+    v_out = v_out(1:k);
+    n_out = n_out(1:k);
+  }
+  write, format="There are %d sampled frequencies out of %d measurements.\n",
+    k, number;
 
 
   /*
@@ -4002,6 +3980,9 @@ func mira_wrap_image(arr, dat)
     w = mira_get_w(dat);
     x = mira_get_x(dat);
     y = mira_get_y(dat);
+    if (naxis3 == 1) {
+      w = median(w);
+    }
     if (naxis1 != numberof(x) ||
         naxis2 != numberof(y) ||
         naxis3 != numberof(w)) {
